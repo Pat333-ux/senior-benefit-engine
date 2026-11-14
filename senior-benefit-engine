@@ -1,0 +1,120 @@
+/**
+ * senior-benefit-engine - Core Microservice Framework
+ * Handles senior profiles, event dispatching, and state/federal Webhook subscribers.
+ */
+
+const express = require('express');
+const crypto = require('crypto');
+const app = express();
+
+app.use(express.json());
+
+// In-Memory Databases (Replace with Postgres/Redis in production)
+const seniors = new Map();
+const subscriptions = new Map();
+
+/**
+ * 1. REGISTER SENIOR PROFILE
+ */
+app.post('/api/v1/seniors', (req, res) => {
+    const { id, name, ssnLast4, state, benefitType, monthlyAmount } = req.body;
+    if (!id || !name) {
+        return res.status(400).json({ error: 'Missing required senior fields (id, name)' });
+    }
+
+    const seniorRecord = {
+        id,
+        name,
+        ssnLast4: ssnLast4 || '0000',
+        state: state || 'IN',
+        benefitType: benefitType || 'Retirement/OASI',
+        monthlyAmount: monthlyAmount || 0,
+        medicareStatus: 'Active',
+        fssaStatus: 'Enrolled',
+        lastUpdated: new Date().toISOString()
+    };
+
+    seniors.set(id, seniorRecord);
+    res.status(201).json({ status: 'success', data: seniorRecord });
+});
+
+/**
+ * 2. SUBSCRIBE WEBHOOK (State / Federal / Client Endpoints)
+ */
+app.post('/api/v1/webhooks/subscribe', (req, res) => {
+    const { subscriberId, url, targetAgency, events } = req.body;
+    if (!subscriberId || !url || !events) {
+        return res.status(400).json({ error: 'Missing subscriberId, url, or events array' });
+    }
+
+    const secret = crypto.randomBytes(32).toString('hex');
+    subscriptions.set(subscriberId, { url, secret, targetAgency: targetAgency || 'GENERAL', events });
+
+    res.status(201).json({
+        status: 'subscribed',
+        subscriberId,
+        secret // Shared secret used for HMAC SHA-256 verification
+    });
+});
+
+/**
+ * 3. TRIGGER BENEFIT UPDATE & DISPATCH WEBHOOKS
+ */
+app.post('/api/v1/seniors/:id/update', async (req, res) => {
+    const senior = seniors.get(req.params.id);
+    if (!senior) {
+        return res.status(404).json({ error: 'Senior profile not found' });
+    }
+
+    const { monthlyAmount, medicareStatus, fssaStatus } = req.body;
+    const oldAmount = senior.monthlyAmount;
+
+    if (monthlyAmount !== undefined) senior.monthlyAmount = monthlyAmount;
+    if (medicareStatus !== undefined) senior.medicareStatus = medicareStatus;
+    if (fssaStatus !== undefined) senior.fssaStatus = fssaStatus;
+    senior.lastUpdated = new Date().toISOString();
+
+    const payload = {
+        eventId: crypto.randomUUID(),
+        eventType: 'benefit.profile_updated',
+        timestamp: senior.lastUpdated,
+        data: {
+            seniorId: senior.id,
+            name: senior.name,
+            state: senior.state,
+            previousAmount: oldAmount,
+            newAmount: senior.monthlyAmount,
+            medicareStatus: senior.medicareStatus,
+            fssaStatus: senior.fssaStatus
+        }
+    };
+
+    const dispatches = [];
+    for (const [subId, sub] of subscriptions.entries()) {
+        if (sub.events.includes('benefit.profile_updated')) {
+            const success = await sendHMACWebhook(sub, payload);
+            dispatches.push({ subscriberId: subId, agency: sub.targetAgency, success });
+        }
+    }
+
+    res.json({ status: 'updated', profile: senior, dispatches });
+});
+
+/**
+ * Helper: Secure Webhook Dispatcher
+ */
+async function sendHMACWebhook(subscription, payload) {
+    const bodyStr = JSON.stringify(payload);
+    const signature = crypto
+        .createHmac('sha256', subscription.secret)
+        .update(bodyStr)
+        .digest('hex');
+
+    console.log(`[DISPATCH] Sent to ${subscription.targetAgency} at ${subscription.url} | Sig: sha256=${signature}`);
+    return true;
+}
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Senior Benefit Engine active on port ${PORT}`);
+});
