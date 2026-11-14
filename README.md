@@ -1,1 +1,1 @@
-# senior-benefit-engine
+An event-driven microservice and state engine for tracking senior Social Security, Medicare, and Indiana state benefits. Features automated webhook dispatching, HMAC payload verification, state-federal API bridge stubs, and real-time status synchronization for elderly care services. # senior-benefit-engine
